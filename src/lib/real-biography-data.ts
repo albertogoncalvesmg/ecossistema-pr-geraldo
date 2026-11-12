@@ -26,7 +26,7 @@ export const OFFICIAL_PHOTOS = {
   churchFacade: "/assets/fachada-ipub.jpg",               // WhatsApp Image 2026-11-06 at 09.49.51.jpg
   coupleBackCover: "/assets/casal-capa-contra.png",       // capacontra.png
   bookCoverDepressao: "/assets/capa-recompensas-depressao.png",
-  bookCoverVidaDeus: "/assets/capa-vida-que-deus-preparou.jpg",
+  bookCoverVidaDeus: "/assets/capa-vida-que-Deus-preparou.jpg",
   bookCoverHierarquia: "/assets/capa-hierarquia-submissao.png",
 };
 
