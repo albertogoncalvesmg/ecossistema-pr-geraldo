@@ -1,0 +1,363 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+// ============================================================================
+// 1. GOVERNANÇA, USUÁRIOS, PERMISSÕES (RBAC) E AUDITORIA
+// ============================================================================
+
+enum Role {
+  ADMIN        // Acesso completo, configurações, usuários e integrações
+  PASTOR       // Revisão, aprovação final, publicações, agenda e acervo
+  COMUNICACAO  // Criação/edição de conteúdo, mídia, redes sociais (sem acesso a aconselhamento)
+  PASTORAL     // Acesso exclusivo e autorizado às solicitações de aconselhamento
+}
+
+enum ApprovalStatus {
+  DRAFT             // Rascunho em elaboração
+  PENDING_APPROVAL  // Aguardando revisão e aprovação humana (Pastor/Admin)
+  APPROVED          // Aprovado para publicação ou agendamento
+  PUBLISHED         // Publicado oficialmente
+  REJECTED          // Devolvido para ajustes
+  ARCHIVED          // Arquivado
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(COMUNICACAO)
+  isActive     Boolean  @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relacionamentos operacionais
+  createdContents   MinisterialContent[] @relation("ContentAuthor")
+  approvedContents  MinisterialContent[] @relation("ContentApprover")
+  socialPosts       SocialPost[]         @relation("SocialAuthor")
+  approvedPosts     SocialPost[]         @relation("SocialApprover")
+  counselingAssigned CounselingRequest[] @relation("CounselingHandler")
+  studioRecordings  StudioRecording[]
+  archiveUploads    ArchiveDocument[]
+  auditLogs         AuditLog[]
+
+  @@index([email, isActive])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action     String   // Ex: LOGIN_SUCCESS, COUNSELING_DECRYPTED, CONTENT_APPROVED
+  module     String   // PORTAL, CENTRAL, ESTUDIO, ARQUIVO_VIVO, AUTH
+  targetId   String?  // ID do registo afetado
+  metadata   Json?    // Detalhes técnicos sem expor dados sensíveis em texto claro
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  @@index([module, createdAt])
+  @@index([userId, createdAt])
+}
+
+// ============================================================================
+// 2. MÓDULO 1 & 2: PORTAL OFICIAL E CENTRAL MINISTERIAL
+// ============================================================================
+
+enum ContentType {
+  SERMON        // Pregação / Ministração
+  BIBLE_STUDY   // Estudo Bíblico
+  ARTICLE       // Artigo / Texto Pastoral
+  DEVOTIONAL    // Mensagem Devocional
+  BIOGRAPHY_DOC // Seção Biográfica Homologada
+}
+
+model MinisterialContent {
+  id                String         @id @default(cuid())
+  slug              String         @unique
+  title             String
+  subtitle          String?
+  type              ContentType
+  category          String
+  biblicalReference String?        // Ex: "Romanos 12:1-2"
+  summary           String?        @db.Text
+  bodyText          String         @db.Text
+  videoUrl          String?
+  audioUrl          String?
+  thumbnailUrl      String?
+  status            ApprovalStatus @default(DRAFT)
+  isFeatured        Boolean        @default(false)
+  isDemoData        Boolean        @default(false) // Identifica dados de demonstração
+
+  authorId          String
+  author            User           @relation("ContentAuthor", fields: [authorId], references: [id])
+  approverId        String?
+  approver          User?          @relation("ContentApprover", fields: [approverId], references: [id])
+  approvedAt        DateTime?
+  publishedAt       DateTime?
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  aiDrafts          AiContentAssistance[]
+
+  @@index([status, publishedAt])
+  @@index([type, category])
+}
+
+model Book {
+  id              String         @id @default(cuid())
+  slug            String         @unique
+  title           String
+  subtitle        String?
+  author          String         @default("Pr. Geraldo Afonso")
+  coverUrl        String
+  description     String         @db.Text
+  synopsis        String         @db.Text
+  authorizedExcerpt String?      @db.Text
+  format          String         // Ex: "Impresso e Digital (E-book)"
+  priceCents      Int?           // Preço em centavos (opcional)
+  checkoutUrl     String?        // Link externo oficial de venda
+  isFeatured      Boolean        @default(false)
+  isActive        Boolean        @default(true)
+  isDemoData      Boolean        @default(false)
+  publishedYear   Int?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([isActive, isFeatured])
+}
+
+model MinisterialEvent {
+  id              String   @id @default(cuid())
+  title           String
+  description     String   @db.Text
+  eventType       String   // Congresso, Culto, Conferência, Lançamento
+  startDate       DateTime
+  endDate         DateTime?
+  locationName    String
+  cityState       String?
+  isOnline        Boolean  @default(false)
+  externalLink    String?
+  isPublic        Boolean  @default(true)
+  isDemoData      Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([startDate, isPublic])
+}
+
+// ============================================================================
+// 3. PROTEÇÃO ESPECIAL LGPD: ACONSELHAMENTO E ORAÇÃO
+// ============================================================================
+
+enum CounselingStatus {
+  RECEIVED       // Recebido, aguardando triagem
+  IN_ATTENDANCE  // Em acompanhamento pela equipa pastoral
+  ANSWERED       // Respondido / Encaminhado
+  ARCHIVED       // Arquivado com retenção controlada
+}
+
+model CounselingRequest {
+  id                    String           @id @default(cuid())
+  subjectCategory       String           // Oração, Aconselhamento Familiar, Dúvida Bíblica
+  // Campos sensíveis armazenados criptografados com AES-256-GCM (formato iv:authTag:cipherText)
+  encryptedRequesterName String          @db.Text
+  encryptedContactInfo   String          @db.Text
+  encryptedMessage       String          @db.Text
+  encryptedInternalNotes String?         @db.Text
+
+  lgpdConsentAccepted   Boolean          @default(true)
+  lgpdConsentTimestamp  DateTime         @default(now())
+  retentionExpiresAt    DateTime         // Data limite para expurgo/anonimização LGPD
+  status                CounselingStatus @default(RECEIVED)
+
+  assignedToId          String?
+  assignedTo            User?            @relation("CounselingHandler", fields: [assignedToId], references: [id])
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  @@index([status, createdAt])
+}
+
+// ============================================================================
+// 4. EDITOR IA, REDES SOCIAIS, WHATSAPP E CALENDÁRIO EDITORIAL
+// ============================================================================
+
+model AiContentAssistance {
+  id                  String              @id @default(cuid())
+  sourceContentId     String?
+  sourceContent       MinisterialContent? @relation(fields: [sourceContentId], references: [id])
+  originalInputText   String              @db.Text
+  taskType            String              // GRAMMAR, SUMMARY, SOCIAL_ADAPTATION, VIDEO_SCRIPT
+  generatedOutput     String              @db.Text
+  humanReviewed       Boolean             @default(false)
+  theologicalCheckOk  Boolean             @default(false)
+  createdAt           DateTime            @default(now())
+}
+
+enum SocialPlatform {
+  INSTAGRAM
+  FACEBOOK
+  YOUTUBE
+  TIKTOK
+  WHATSAPP_STATUS
+}
+
+enum SocialDeliveryMode {
+  OFFICIAL_API        // Publicado via API Oficial autenticada
+  ASSISTED_EXPORT     // Exportado para publicação manual assistida (quando API restringe)
+}
+
+model SocialPost {
+  id                String             @id @default(cuid())
+  title             String
+  platform          SocialPlatform
+  captionText       String             @db.Text
+  mediaUrls         String[]
+  scheduledFor      DateTime?
+  publishedAt       DateTime?
+  status            ApprovalStatus     @default(DRAFT)
+  deliveryMode      SocialDeliveryMode @default(ASSISTED_EXPORT)
+  externalPostId    String?            // Preenchido apenas após confirmação real da plataforma
+  platformResponse  Json?              // Log real de retorno da API oficial
+
+  authorId          String
+  author            User               @relation("SocialAuthor", fields: [authorId], references: [id])
+  approverId        String?
+  approver          User?              @relation("SocialApprover", fields: [approverId], references: [id])
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@index([platform, status, scheduledFor])
+}
+
+model EditorialCalendarItem {
+  id          String         @id @default(cuid())
+  title       String
+  description String?        @db.Text
+  itemType    String         // PUBLICACAO_DIARIA, CAMPANHA_LIVRO, TRANSMISSAO, DATA_COMEMORATIVA
+  targetDate  DateTime
+  status      ApprovalStatus @default(DRAFT)
+  channel     String         // Portal, Instagram, YouTube, Todos
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([targetDate])
+}
+
+// ============================================================================
+// 5. MÓDULO 3: ESTÚDIO GA (PRODUÇÃO AUDIOVISUAL E TELEPROMPTER)
+// ============================================================================
+
+enum VideoEditStatus {
+  SCRIPTING       // Em roteirização / pronto para teleprompter
+  RECORDED        // Bruto gravado
+  TRANSCRIBING    // Em transcrição automática
+  EDITING         // Em edição e corte
+  READY_FOR_REVIEW // Pronto para aprovação pastoral
+  FINALIZED       // Finalizado e distribuído
+}
+
+model StudioRecording {
+  id                String          @id @default(cuid())
+  title             String
+  category          String
+  description       String?         @db.Text
+  teleprompterScript String?        @db.Text
+  rawFileKey        String?         // Chave no bucket privado S3/R2
+  finalFileKey      String?
+  transcriptionText String?         @db.Text
+  aiSuggestedCuts   Json?           // Lista de timecodes sugeridos pela IA
+  editStatus        VideoEditStatus @default(SCRIPTING)
+  approvalStatus    ApprovalStatus  @default(DRAFT)
+  recordedDate      DateTime        @default(now())
+
+  createdById       String
+  createdBy         User            @relation(fields: [createdById], references: [id])
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+}
+
+model LiveBroadcastPlan {
+  id                String   @id @default(cuid())
+  title             String
+  description       String   @db.Text
+  scheduledAt       DateTime
+  platform          String   @default("YOUTUBE")
+  streamUrl         String?
+  preLiveChecklist  Json     // Estado do checklist pré-transmissão
+  postLiveNotes     String?  @db.Text
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+// ============================================================================
+// 6. MÓDULO 4: ARQUIVO VIVO GA (ACERVO HISTÓRICO E BUSCA RAG)
+// ============================================================================
+
+enum ArchiveMaterialType {
+  BOOK
+  WORKBOOK          // Apostila
+  SERMON_MANUSCRIPT // Esboço / Sermão histórico
+  BIBLE_STUDY
+  DOCUMENT
+  PHOTOGRAPH
+  AUDIO
+  VIDEO
+  TRANSCRIPTION
+  ARTICLE
+}
+
+model ArchiveDocument {
+  id                String              @id @default(cuid())
+  title             String
+  author            String              @default("Pr. Geraldo Afonso")
+  originalDate      DateTime?           // Data histórica em que a obra/mensagem foi produzida
+  materialType      ArchiveMaterialType
+  category          String
+  subject           String
+  keywords          String[]
+  biblicalReferences String[]           // Ex: ["Efésios 4:11", "1 Coríntios 12"]
+  description       String              @db.Text
+  storageKey        String              // Caminho no bucket privado
+  mimeType          String
+  fileSizeBytes     Int
+  versionNumber     Int                 @default(1)
+  isRestricted      Boolean             @default(false) // Restrito apenas a Pastor e Admin
+  isDemoData        Boolean             @default(false)
+
+  uploadedById      String
+  uploadedBy        User                @relation(fields: [uploadedById], references: [id])
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  chunks            ArchiveDocumentChunk[]
+
+  @@index([materialType, category])
+  @@index([subject])
+}
+
+model ArchiveDocumentChunk {
+  id                String          @id @default(cuid())
+  documentId        String
+  document          ArchiveDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  chunkIndex        Int
+  pageNumber        Int?            // Página exata para citação obrigatória
+  chapterTitle      String?         // Capítulo ou secção para citação obrigatória
+  biblicalRefInChunk String?
+  contentText       String          @db.Text
+  // Vetor de 1536 dimensões para busca semântica (OpenAI text-embedding-3-small)
+  embedding         Unsupported("vector(1536)")?
+
+  createdAt         DateTime        @default(now())
+
+  @@index([documentId, chunkIndex])
+}
